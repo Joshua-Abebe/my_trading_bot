@@ -3,9 +3,10 @@ from tkinter import scrolledtext
 from threading import Thread
 import asyncio
 
-from config import SYMBOL_DEFAULT, MAX_ACCOUNT_RISK, TOTAL_POSITIONS
+from config import SYMBOL_DEFAULT, TOTAL_POSITIONS
 from telegram_listener import start_listener  # async Telegram listener
 from mt5_connector import get_account_balance, initialize_mt5
+from risk_manager import _risk_ratio_for_balance
 from trade_engine import set_runner_enabled
 from logger import log_event
 
@@ -26,7 +27,7 @@ class CopyTraderUI:
         # Risk Settings
         self.risk_label = tk.Label(
             root,
-            text=f"Risk: {MAX_ACCOUNT_RISK*100:.1f}% per {TOTAL_POSITIONS} trades",
+            text=self._risk_text(),
             font=("Arial", 10),
         )
         self.risk_label.pack(pady=5)
@@ -112,6 +113,16 @@ class CopyTraderUI:
         # Ensure runner flag in engine matches UI default
         set_runner_enabled(self.runner_enabled_var.get())
 
+    def _risk_text(self, balance=None):
+        if balance is None:
+            return (
+                f"Risk tiers with {TOTAL_POSITIONS} trades: "
+                "<101=60%, 101-<200=75%, 200-800=80%, >800=90%"
+            )
+
+        risk_percent = int(_risk_ratio_for_balance(balance) * 100)
+        return f"Risk: {risk_percent}% across {TOTAL_POSITIONS} trades (balance used: ${balance:.2f})"
+
     def refresh_balance(self):
         try:
             balance = get_account_balance()
@@ -119,6 +130,7 @@ class CopyTraderUI:
             self.append_log(f"Error fetching balance: {e}")
             return
         self.balance_label.config(text=f"Account Balance: ${balance:.2f}")
+        self.risk_label.config(text=self._risk_text(balance))
 
     def _append_log_to_widget(self, message):
         self.log_box.config(state="normal")
@@ -173,7 +185,6 @@ class CopyTraderUI:
 
             task = self.loop.create_task(runner())
             self.loop.run_forever()
-            # Ensure task is cancelled/cleaned up on loop stop
             if not task.done():
                 task.cancel()
                 try:
@@ -191,7 +202,6 @@ class CopyTraderUI:
                 self.loop.close()
                 self.loop = None
             self.running = False
-            # Reflect stopped state in UI
             self.root.after(0, self._on_listener_stopped)
 
     def _on_listener_stopped(self):
@@ -206,7 +216,6 @@ class CopyTraderUI:
 
         if self.loop is not None:
             try:
-                # Stop the event loop safely from the main thread
                 self.loop.call_soon_threadsafe(self.loop.stop)
             except Exception as e:
                 self.append_log(f"Error stopping listener loop: {e}")
@@ -215,11 +224,10 @@ class CopyTraderUI:
         self.status_label.config(text="Status: Stopping...", fg="orange")
 
     def update_ui(self):
-        # Periodic lightweight updates
         self.refresh_balance()
         if self.running:
             self.status_label.config(text="Status: Running", fg="green")
-        self.root.after(5000, self.update_ui)  # refresh every 5s
+        self.root.after(5000, self.update_ui)
 
 
 if __name__ == "__main__":

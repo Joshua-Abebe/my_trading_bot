@@ -6,7 +6,7 @@ TELEGRAM_CHANNEL = "https://t.me/+pLsvUIjzAx81YmU1"
 
 # Trade structure settings
 TOTAL_POSITIONS = 6
-FIXED_STOP_LOSS_DISTANCE = 5.0
+FIXED_STOP_LOSS_DISTANCE = 4.0
 
 # Pre-signal behavior
 # If message is a short standalone direction (e.g. "Sell gold"),
@@ -21,3 +21,4 @@ LOG_FOLDER = "logs"
 
 # Default trading symbol
 SYMBOL_DEFAULT = "XAUUSD"
+

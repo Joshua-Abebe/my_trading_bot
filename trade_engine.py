@@ -37,7 +37,7 @@ def set_runner_enabled(enabled: bool):
 
 
 def _clamp_volume_to_symbol(volume, symbol_info):
-    """Clamp and step-align volume to symbol settings."""
+    """Clamp volume to symbol limits and align it down to the nearest valid step."""
     if volume <= 0:
         return 0.0
 
@@ -45,13 +45,18 @@ def _clamp_volume_to_symbol(volume, symbol_info):
     vol_max = symbol_info.volume_max or volume
     vol_step = symbol_info.volume_step or 0.01
 
-    volume = max(vol_min, min(volume, vol_max))
+    volume = min(volume, vol_max)
+    if volume < vol_min:
+        return 0.0
 
     if vol_step > 0:
-        steps = round((volume - vol_min) / vol_step)
+        steps = int((volume - vol_min) / vol_step)
         volume = vol_min + steps * vol_step
 
-    return max(0.0, volume)
+    if volume < vol_min:
+        return 0.0
+
+    return round(max(0.0, volume), 2)
 
 
 def _get_position_type_for_side(side):
@@ -63,7 +68,7 @@ def _get_side_order_type(side):
 
 
 def _fixed_stop_loss(entry_price, side):
-    """Return SL exactly 5 USD away from entry."""
+    """Return SL exactly 4 USD away from entry."""
     return entry_price - FIXED_STOP_LOSS_DISTANCE if side == "buy" else entry_price + FIXED_STOP_LOSS_DISTANCE
 
 
@@ -124,28 +129,16 @@ def _start_break_even_monitor(symbol, side, first_trigger_price):
     Thread(target=_monitor, daemon=True).start()
 
 
-def _compute_safe_lot(desired_lot, symbol_info, margin_per_lot, balance):
+def _free_margin_or_balance(balance):
     acc = mt5.account_info()
     if acc is None:
-        log_event("MT5 account_info() unavailable while placing order.")
+        log_event("MT5 account_info() unavailable while checking margin.")
         return 0.0
 
-    free_margin = acc.margin_free
+    free_margin = getattr(acc, "margin_free", None)
     if free_margin is None:
-        free_margin = balance
-
-    lot = max(0.0, desired_lot)
-
-    if margin_per_lot > 0 and free_margin > 0:
-        lot = min(lot, free_margin / margin_per_lot)
-
-    lot = _clamp_volume_to_symbol(lot, symbol_info)
-
-    if lot <= 0 or lot < (symbol_info.volume_min or 0.0):
-        log_event(f"Not enough free margin to open even minimum volume for {symbol_info.name}.")
-        return 0.0
-
-    return lot
+        return balance
+    return max(0.0, free_margin)
 
 
 def _prepare_symbol_and_account(symbol):
@@ -188,8 +181,41 @@ def _margin_per_lot(symbol, entry_price, symbol_info, side):
     return symbol_info.margin_initial or 0.0
 
 
+def _plan_position_sizing(balance, entry_price, stop_loss, symbol, symbol_info, side):
+    """Plan one equal lot size for all six positions before sending any order."""
+    risk_total_lot = calculate_lot_size(balance, entry_price, stop_loss, symbol)
+    if risk_total_lot <= 0:
+        log_event(f"Calculated lot size <= 0 for {symbol}. Aborting trade.")
+        return None, None
+
+    margin_per_lot = _margin_per_lot(symbol, entry_price, symbol_info, side)
+    free_margin = _free_margin_or_balance(balance)
+
+    margin_total_lot = risk_total_lot
+    if margin_per_lot > 0 and free_margin > 0:
+        margin_total_lot = free_margin / margin_per_lot
+
+    total_lot_cap = min(risk_total_lot, margin_total_lot)
+    per_position_lot = _clamp_volume_to_symbol(total_lot_cap / TOTAL_POSITIONS, symbol_info)
+
+    if per_position_lot <= 0:
+        log_event(
+            f"Cannot afford minimum lot for all {TOTAL_POSITIONS} positions on {symbol}. "
+            f"risk_total_lot={risk_total_lot:.4f}, margin_total_lot={margin_total_lot:.4f}"
+        )
+        return None, None
+
+    planned_total_lot = per_position_lot * TOTAL_POSITIONS
+    log_event(
+        f"Planned sizing for {symbol} {side}: risk_total_lot={risk_total_lot:.4f}, "
+        f"margin_total_lot={margin_total_lot:.4f}, planned_total_lot={planned_total_lot:.4f}, "
+        f"per_position_lot={per_position_lot:.4f}"
+    )
+    return per_position_lot, planned_total_lot
+
+
 def execute_pre_signal_trade(quick_signal):
-    """Open six positions with fixed 5 USD SL and no TP."""
+    """Open six positions with fixed 4 USD SL and no TP."""
     global PENDING_PRE_SIGNAL
 
     symbol = (quick_signal or {}).get("symbol") or SYMBOL_DEFAULT
@@ -205,16 +231,14 @@ def execute_pre_signal_trade(quick_signal):
     balance, entry_price, symbol_info = prep
 
     stop_loss = _fixed_stop_loss(entry_price, side)
-    base_lot = calculate_lot_size(balance, entry_price, stop_loss, symbol)
-    if base_lot <= 0:
-        log_event(f"Pre-signal lot size <= 0 for {symbol}. Aborting.")
+    per_position_lot, planned_total_lot = _plan_position_sizing(
+        balance, entry_price, stop_loss, symbol, symbol_info, side
+    )
+    if per_position_lot is None:
         return
 
-    per_position_lot = base_lot / TOTAL_POSITIONS
-    margin_per_lot = _margin_per_lot(symbol, entry_price, symbol_info, side)
-
     log_event(
-        f"Pre-signal open for {symbol} {side}: base_lot={base_lot}, "
+        f"Pre-signal open for {symbol} {side}: planned_total_lot={planned_total_lot:.4f}, "
         f"positions={TOTAL_POSITIONS}, per_position_lot={per_position_lot:.4f}, sl={stop_loss}"
     )
 
@@ -224,13 +248,12 @@ def execute_pre_signal_trade(quick_signal):
 
     opened_any = False
     for _ in range(TOTAL_POSITIONS):
-        safe_lot = _compute_safe_lot(per_position_lot, symbol_info, margin_per_lot, balance)
-        if safe_lot <= 0:
-            break
-
-        result = open_position(symbol, side.upper(), safe_lot, stop_loss, None)
-        if result is not None:
+        result = open_position(symbol, side.upper(), per_position_lot, stop_loss, None)
+        if result is not None and getattr(result, "retcode", None) == mt5.TRADE_RETCODE_DONE:
             opened_any = True
+        else:
+            log_event(f"Pre-signal order could not be completed for {symbol} {side}. Stopping batch.")
+            break
 
     if not opened_any:
         log_event(f"No pre-signal positions opened for {symbol} {side}.")
@@ -315,7 +338,7 @@ def apply_signal_to_existing_positions(signal_data):
 
 
 def execute_trade(signal_data):
-    """Open exactly six positions: five TP trades and one runner, all with fixed 5 USD SL."""
+    """Open exactly six positions: five TP trades and one runner, all with fixed 4 USD SL."""
     symbol = signal_data.get("symbol")
     side = str(signal_data.get("side", "")).lower()
     take_profits = _selected_take_profits(signal_data.get("take_profits") or [])
@@ -334,52 +357,50 @@ def execute_trade(signal_data):
     balance, entry_price, symbol_info = prep
 
     stop_loss = _fixed_stop_loss(entry_price, side)
-    base_lot = calculate_lot_size(balance, entry_price, stop_loss, symbol)
-    if base_lot <= 0:
-        log_event(f"Calculated lot size <= 0 for {symbol}. Aborting trade.")
+    per_position_lot, planned_total_lot = _plan_position_sizing(
+        balance, entry_price, stop_loss, symbol, symbol_info, side
+    )
+    if per_position_lot is None:
         return
 
-    per_position_lot = base_lot / TOTAL_POSITIONS
-    margin_per_lot = _margin_per_lot(symbol, entry_price, symbol_info, side)
     first_tp = take_profits[0]
-
     log_event(
-        f"Executing trade {symbol} {side}: total_lot={base_lot}, positions={TOTAL_POSITIONS}, "
-        f"used_tps={take_profits}, runner_enabled={RUNNER_ENABLED}, fixed_sl={stop_loss}"
+        f"Executing trade {symbol} {side}: planned_total_lot={planned_total_lot:.4f}, "
+        f"positions={TOTAL_POSITIONS}, used_tps={take_profits}, runner_enabled={RUNNER_ENABLED}, "
+        f"fixed_sl={stop_loss}, per_position_lot={per_position_lot:.4f}"
     )
 
     opened_any = False
 
     for tp in take_profits:
-        safe_lot = _compute_safe_lot(per_position_lot, symbol_info, margin_per_lot, balance)
-        if safe_lot <= 0:
+        log_event(
+            f"Opening TP position for {symbol} {side} lot={per_position_lot:.4f} TP={tp} SL={stop_loss}"
+        )
+        result = open_position(symbol, side.upper(), per_position_lot, stop_loss, tp)
+        if result is not None and getattr(result, "retcode", None) == mt5.TRADE_RETCODE_DONE:
+            opened_any = True
+        else:
+            log_event(f"TP order could not be completed for {symbol} {side}. Stopping batch.")
             break
 
-        log_event(
-            f"Opening TP position for {symbol} {side} lot={safe_lot:.4f} TP={tp} SL={stop_loss}"
-        )
-        result = open_position(symbol, side.upper(), safe_lot, stop_loss, tp)
-        if result is not None:
-            opened_any = True
-
     runner_should_open = RUNNER_ENABLED and TOTAL_POSITIONS > len(take_profits)
-    if runner_should_open:
-        runner_lot = _compute_safe_lot(per_position_lot, symbol_info, margin_per_lot, balance)
-        if runner_lot > 0:
-            log_event(
-                f"Opening runner position for {symbol} {side} lot={runner_lot:.4f} SL={stop_loss}"
-            )
-            runner_result = open_position(symbol, side.upper(), runner_lot, stop_loss, None)
-            if runner_result is not None:
-                retcode = getattr(runner_result, "retcode", None)
-                success_retcodes = {
-                    mt5.TRADE_RETCODE_DONE,
-                    mt5.TRADE_RETCODE_PLACED,
-                    mt5.TRADE_RETCODE_DONE_PARTIAL,
-                }
-                if retcode in success_retcodes:
-                    opened_any = True
-                    log_event(f"Runner position confirmed open for {symbol} (retcode={retcode})")
+    if runner_should_open and opened_any:
+        log_event(
+            f"Opening runner position for {symbol} {side} lot={per_position_lot:.4f} SL={stop_loss}"
+        )
+        runner_result = open_position(symbol, side.upper(), per_position_lot, stop_loss, None)
+        if runner_result is not None:
+            retcode = getattr(runner_result, "retcode", None)
+            success_retcodes = {
+                mt5.TRADE_RETCODE_DONE,
+                mt5.TRADE_RETCODE_PLACED,
+                mt5.TRADE_RETCODE_DONE_PARTIAL,
+            }
+            if retcode in success_retcodes:
+                opened_any = True
+                log_event(f"Runner position confirmed open for {symbol} (retcode={retcode})")
+            else:
+                log_event(f"Runner position could not be completed for {symbol} (retcode={retcode}).")
 
     if not opened_any:
         log_event(f"No positions opened for {symbol} due to risk/margin constraints.")

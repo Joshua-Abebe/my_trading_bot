@@ -419,3 +419,14 @@ Others make sure you follow my instructions well
 2026-03-10 22:28:34,891 - INFO - Disconnecting from 149.154.167.92:443/TcpFull...
 2026-03-10 22:28:34,893 - INFO - Disconnection from 149.154.167.92:443/TcpFull complete!
 2026-03-10 22:28:34,900 - INFO - System stopped by user.
+2026-03-10 22:44:13,244 - INFO - MT5 initialized successfully
+2026-03-10 22:44:13,245 - INFO - MT5 initialized successfully.
+2026-03-10 22:44:13,245 - INFO - Runner position has been enabled via UI.
+2026-03-10 22:44:17,402 - INFO - Listener thread started.
+2026-03-10 22:44:17,409 - INFO - Connecting to 149.154.167.92:443/TcpFull...
+2026-03-10 22:44:17,425 - INFO - Connection to 149.154.167.92:443/TcpFull complete!
+2026-03-10 22:44:17,997 - INFO - Connected to channel: Demo_trading_trial
+2026-03-10 22:44:17,998 - INFO - Telegram listener started
+2026-03-10 22:49:43,668 - INFO - MT5 initialized successfully
+2026-03-10 22:49:43,669 - INFO - MT5 initialized successfully.
+2026-03-10 22:49:43,669 - INFO - Runner position has been enabled via UI.
