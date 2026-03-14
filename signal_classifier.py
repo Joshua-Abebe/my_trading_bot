@@ -28,10 +28,9 @@ def classify_message(message_text):
     """Classify incoming Telegram message."""
 
     raw_text = (message_text or "")
-    text = raw_text.lower()
     normalized = _normalize_text(raw_text)
 
-    if text.startswith("risky trade"):
+    if normalized.startswith("risky trade"):
         return "NEW_TRADE"
 
     if _is_short_gold_command(raw_text):

@@ -10,19 +10,26 @@ from mt5_connector import (
 from logger import log_event
 
 
-def move_all_to_break_even(buffer=0.0):
+def move_all_to_break_even(buffer=0.0, symbol=None, tickets=None):
     """
-    Move all SLs around entry for every open position.
+    Move SLs around entry for matching open positions.
 
     buffer behavior:
     - BUY positions: SL = entry - buffer
     - SELL positions: SL = entry + buffer
     """
 
-    positions = get_open_positions()
+    positions = list(get_open_positions() or [])
+    if symbol is not None:
+        positions = [pos for pos in positions if pos.symbol == symbol]
+    if tickets:
+        ticket_set = set(tickets)
+        positions = [pos for pos in positions if pos.ticket in ticket_set]
 
     if not positions:
-        log_event("move_all_to_break_even called but no open positions found.")
+        log_event(
+            f"move_all_to_break_even called but no matching open positions found. symbol={symbol}, tickets={tickets}"
+        )
         return
 
     for pos in positions:
@@ -43,9 +50,11 @@ def move_all_to_break_even(buffer=0.0):
         )
 
     if buffer:
-        log_event(f"All positions moved near break-even with buffer={buffer}")
+        log_event(
+            f"Matching positions moved near break-even with buffer={buffer}, symbol={symbol}, tickets={tickets}"
+        )
     else:
-        log_event("All positions moved to exact break-even")
+        log_event(f"Matching positions moved to exact break-even, symbol={symbol}, tickets={tickets}")
 
 
 def close_all_positions():

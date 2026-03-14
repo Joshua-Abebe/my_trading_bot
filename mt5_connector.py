@@ -18,17 +18,32 @@ def get_account_balance():
     return 0
 
 
-def get_symbol_price(symbol):
+def get_symbol_price(symbol, side=None):
     tick = mt5.symbol_info_tick(symbol)
-    if tick:
-        return tick.ask
-    return None
+    if not tick:
+        return None
+
+    normalized_side = str(side or "").upper()
+    if normalized_side == "SELL":
+        return tick.bid or tick.last or tick.ask
+    if normalized_side == "BUY":
+        return tick.ask or tick.last or tick.bid
+
+    return tick.ask or tick.bid or tick.last
 
 
 def open_position(symbol, side, lot, sl, tp=None):
     """Open MT5 market trade."""
-    price = get_symbol_price(symbol)
     normalized_side = str(side).upper()
+    if lot <= 0:
+        log_event(f"Order skipped for {symbol} {normalized_side}: invalid lot {lot}")
+        return None
+
+    price = get_symbol_price(symbol, normalized_side)
+    if price is None:
+        log_event(f"Order skipped for {symbol} {normalized_side}: no executable price available")
+        return None
+
     order_type = mt5.ORDER_TYPE_BUY if normalized_side == "BUY" else mt5.ORDER_TYPE_SELL
 
     tp_value = float(tp) if tp else 0.0
@@ -147,7 +162,11 @@ def close_position(ticket):
         return
     position = positions[0]
     order_type = mt5.ORDER_TYPE_SELL if position.type == 0 else mt5.ORDER_TYPE_BUY
-    price = get_symbol_price(position.symbol)
+    close_side = "SELL" if order_type == mt5.ORDER_TYPE_SELL else "BUY"
+    price = get_symbol_price(position.symbol, close_side)
+    if price is None:
+        log_event(f"Close skipped for {position.symbol} ticket={ticket}: no executable price available")
+        return
     request = {
         "action": mt5.TRADE_ACTION_DEAL,
         "position": ticket,

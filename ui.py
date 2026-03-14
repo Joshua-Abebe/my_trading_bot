@@ -117,7 +117,8 @@ class CopyTraderUI:
         if balance is None:
             return (
                 f"Risk tiers with {TOTAL_POSITIONS} trades: "
-                "<101=60%, 101-<200=75%, 200-800=80%, >800=90%"
+                "<101=50%, 101-<200=75%, 200-800=80%, >800=90%. "
+                "Reentry: 30% risk, 4 USD offset, 4 USD SL, cancel pending orders at 25 USD drift."
             )
 
         risk_percent = int(_risk_ratio_for_balance(balance) * 100)

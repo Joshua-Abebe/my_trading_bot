@@ -191,7 +191,7 @@ def _start_break_even_monitor(symbol, side, first_trigger_price, tracked_tickets
                         f"{symbol} ASK {price} reached TP1 trigger {first_trigger_price}. "
                         "Moving all SLs to exact break-even."
                     )
-                    move_all_to_break_even(0.0)
+                    move_all_to_break_even(0.0, symbol=symbol, tickets=tracked_tickets)
                     if tracked_tickets and reference_entry is not None and take_profits:
                         _start_reentry_monitor(symbol, side, tracked_tickets, reference_entry, take_profits)
                     break
@@ -205,7 +205,7 @@ def _start_break_even_monitor(symbol, side, first_trigger_price, tracked_tickets
                         f"{symbol} BID {price} reached TP1 trigger {first_trigger_price}. "
                         "Moving all SLs to exact break-even."
                     )
-                    move_all_to_break_even(0.0)
+                    move_all_to_break_even(0.0, symbol=symbol, tickets=tracked_tickets)
                     if tracked_tickets and reference_entry is not None and take_profits:
                         _start_reentry_monitor(symbol, side, tracked_tickets, reference_entry, take_profits)
                     break
@@ -307,6 +307,8 @@ def _start_pending_reentry_guard(symbol, side, pending_tickets, reentry_price):
             time.sleep(2)
 
     Thread(target=_monitor, daemon=True).start()
+
+
 def _free_margin_or_balance(balance):
     acc = mt5.account_info()
     if acc is None:
@@ -319,7 +321,7 @@ def _free_margin_or_balance(balance):
     return max(0.0, free_margin)
 
 
-def _prepare_symbol_and_account(requested_symbol):
+def _prepare_symbol_and_account(requested_symbol, side=None):
     balance = get_account_balance()
     account_info = mt5.account_info()
     if account_info is None:
@@ -344,7 +346,8 @@ def _prepare_symbol_and_account(requested_symbol):
             return None, None, None, None
 
     resolved_symbol = symbol_info.name
-    entry_price = get_symbol_price(resolved_symbol)
+    price_side = side.upper() if isinstance(side, str) else None
+    entry_price = get_symbol_price(resolved_symbol, price_side)
     if entry_price is None:
         log_event(f"Cannot get current market price for {resolved_symbol}.")
         return None, None, None, None
@@ -401,7 +404,7 @@ def _plan_position_sizing(balance, entry_price, stop_loss, symbol, symbol_info, 
 
 def _place_reentry_orders(symbol, side, reference_entry, take_profits):
     """Place 6 pending reentry orders using 30% risk and 4 USD SL distance."""
-    prep = _prepare_symbol_and_account(symbol)
+    prep = _prepare_symbol_and_account(symbol, side)
     if prep[0] is None:
         return
     balance, _, symbol_info, resolved_symbol = prep
@@ -471,7 +474,7 @@ def execute_pre_signal_trade(quick_signal):
         log_event(f"Invalid pre-signal side: {quick_signal}")
         return
 
-    prep = _prepare_symbol_and_account(requested_symbol)
+    prep = _prepare_symbol_and_account(requested_symbol, side)
     if prep[0] is None:
         return
     balance, entry_price, symbol_info, symbol = prep
@@ -510,6 +513,12 @@ def execute_pre_signal_trade(quick_signal):
     new_tickets = [
         p.ticket for p in after if p.type == position_type and p.ticket not in before_tickets
     ]
+    if not new_tickets:
+        log_event(
+            f"Pre-signal positions were opened for {symbol} {side}, but no new tickets were confirmed yet. "
+            "Skipping pending pre-signal tracking."
+        )
+        return
 
     PENDING_PRE_SIGNAL = {
         "symbol": symbol,
@@ -602,7 +611,7 @@ def execute_trade(signal_data):
         log_event(f"No usable take-profit levels provided for {requested_symbol}. Aborting trade.")
         return
 
-    prep = _prepare_symbol_and_account(requested_symbol)
+    prep = _prepare_symbol_and_account(requested_symbol, side)
     if prep[0] is None:
         return
     balance, entry_price, symbol_info, symbol = prep
@@ -668,6 +677,12 @@ def execute_trade(signal_data):
     ]
     tracked_positions.sort(key=lambda pos: pos.ticket)
     tracked_positions = tracked_positions[:TOTAL_POSITIONS]
+    if not tracked_positions:
+        log_event(
+            f"No newly tracked positions found after order placement for {symbol} {side}. "
+            "Skipping break-even/reentry monitor startup."
+        )
+        return
     tracked_tickets = [pos.ticket for pos in tracked_positions]
     reference_entry = entry_price
     if tracked_positions:
